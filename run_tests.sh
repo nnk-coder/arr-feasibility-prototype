@@ -56,6 +56,7 @@ if [ -n "$missing" ]; then
     echo
     skipped=1
 else
+    run "Module imports"          tests/test_imports.py
     run "Parcel accumulation"     tests/test_parcel_accumulation.py
 
     echo "── Geometry pipeline"

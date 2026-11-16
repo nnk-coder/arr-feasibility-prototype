@@ -37,10 +37,12 @@ class EligibilityResult:
     ineligible_ha: float
     reason_ha: dict[str, float]
     test_coverage_pct: dict[str, float | None]
-    lulc_rows: list = field(default_factory=list)
-    lulc_tile_url: str = ""
     scale_m: int
     tile_url: str
+    # Fields with defaults must come after every field without one, or the
+    # generated __init__ is invalid and the class fails at import time.
+    lulc_rows: list = field(default_factory=list)
+    lulc_tile_url: str = ""
     assumptions: dict = field(default_factory=dict)
     caveats: list[str] = field(default_factory=list)
 
