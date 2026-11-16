@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import ee
 
@@ -198,14 +199,43 @@ def initialize(force: bool = False) -> None:
     if _initialised and not force:
         return
 
-    project, _project_source = _project()
-    if not project:
-        raise GEEAuthError(
-            "GEE_PROJECT is not set. Add it to Streamlit secrets when "
-            "deployed, or to your .env file locally."
-        )
-
+    project, project_source = _project()
     key_json, creds_source = _credentials_json()
+
+    # The project id carried inside the service account key. Used to give a
+    # precise instruction when GEE_PROJECT is missing or still a placeholder,
+    # rather than making the user go and look it up.
+    key_project = ""
+    if key_json:
+        try:
+            key_project = str(json.loads(key_json).get("project_id", "") or "")
+        except json.JSONDecodeError:
+            key_project = ""
+
+    if not project:
+        if key_project:
+            # Nothing was configured, but the key names its project. Using it
+            # is almost always right, so proceed rather than block.
+            project, project_source = key_project, "service account key"
+        else:
+            raise GEEAuthError(
+                "GEE_PROJECT is not set. Add it to Streamlit secrets when "
+                "deployed, or to your .env file locally."
+            )
+    elif _looks_like_placeholder(project):
+        # Set, but still template text. This is a configuration error worth
+        # surfacing rather than silently working around.
+        hint = (
+            f"\n\nYour service account key says the project is "
+            f"'{key_project}'. Set:\n    GEE_PROJECT = \"{key_project}\""
+            if key_project
+            else ""
+        )
+        raise GEEAuthError(
+            f"GEE_PROJECT is still the template value '{project}' rather "
+            f"than a real project id (read from: {project_source})."
+            + hint
+        )
 
     if key_json:
         try:
@@ -284,3 +314,79 @@ def initialize(force: bool = False) -> None:
 
 def is_initialised() -> bool:
     return _initialised
+
+
+# Anything resembling PEM key material, so it can be stripped before an error
+# reaches the screen or the deployment logs.
+_PEM_PATTERN = re.compile(
+    r"-----BEGIN[^-]*-----.*?-----END[^-]*-----", re.DOTALL
+)
+
+
+def safe_error(exc: Exception) -> str:
+    """Render an exception for display with key material removed.
+
+    Earth Engine and google-auth both echo credential dictionaries into their
+    exception messages. Any error surfaced in the UI passes through here, so a
+    future code path cannot put a private key on screen by accident.
+    """
+    text = str(exc)
+    text = _PEM_PATTERN.sub("[PRIVATE KEY REDACTED]", text)
+    # Catch a bare key body that lost its PEM header in formatting.
+    text = re.sub(r"[A-Za-z0-9+/]{200,}={0,2}", "[REDACTED]", text)
+
+    hint = _hint_for(text)
+    return f"{text}{hint}"
+
+
+def _hint_for(message: str) -> str:
+    """Map known Google Cloud failures to the action that resolves them."""
+    lowered = message.lower()
+
+    if "serviceusage" in lowered or "serviceusageconsumer" in lowered:
+        return (
+            "\n\n**What this means:** the service account can authenticate "
+            "but is not permitted to call APIs on the project.\n\n"
+            "Add the **Service Usage Consumer** role to "
+            "the service account in IAM & Admin → IAM, then wait 2–5 minutes "
+            "for the permission to propagate."
+        )
+    if "earthengine.maps.create" in lowered:
+        return (
+            "\n\n**What this means:** the service account can read Earth "
+            "Engine but cannot generate map tiles. The **Earth Engine "
+            "Resource Viewer** role only grants `earthengine.maps.get`; "
+            "rendering the overlay needs `earthengine.maps.create`.\n\n"
+            "Replace that role with **Earth Engine Resource Writer** in "
+            "IAM & Admin → IAM, then wait 2–5 minutes. The app never writes "
+            "to your assets — Google classifies tile generation as creating "
+            "a map resource."
+        )
+    if "earthengine." in lowered and "denied" in lowered:
+        return (
+            "\n\n**What this means:** the service account is missing an Earth "
+            "Engine permission. It should hold **Earth Engine Resource "
+            "Writer** and **Service Usage Consumer**."
+        )
+    if "earth engine" in lowered and "not registered" in lowered:
+        return (
+            "\n\n**What this means:** the Cloud project is not registered "
+            "with Earth Engine. Open code.earthengine.google.com once and "
+            "select this project."
+        )
+    if "api has not been used" in lowered or "api is not enabled" in lowered:
+        return (
+            "\n\n**What this means:** the Earth Engine API is not enabled. "
+            "Enable it under APIs & Services → Library."
+        )
+    if "quota" in lowered or "resource_exhausted" in lowered:
+        return (
+            "\n\n**What this means:** an Earth Engine quota was hit. Try a "
+            "smaller area, or wait before retrying."
+        )
+    if "computation timed out" in lowered or "deadline" in lowered:
+        return (
+            "\n\n**What this means:** the computation exceeded Earth Engine's "
+            "time limit. Try a smaller boundary."
+        )
+    return ""

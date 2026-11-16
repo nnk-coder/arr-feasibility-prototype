@@ -31,6 +31,7 @@ class EligibilityResult:
     flagged_ha: float
     ineligible_ha: float
     reason_ha: dict[str, float]
+    test_coverage_pct: dict[str, float | None]
     scale_m: int
     tile_url: str
     assumptions: dict = field(default_factory=dict)
@@ -63,9 +64,22 @@ def build_masks(
 ) -> dict:
     """Construct the per-pixel test masks. All server-side, nothing fetched."""
 
-    hansen = ee.Image(config.HANSEN_ASSET).clip(aoi)
+    # unmask(0) on every source is load-bearing, not defensive habit.
+    #
+    # In Earth Engine a masked pixel propagates through .And()/.Or(): the
+    # result is masked, not False. A masked result then makes .where() skip
+    # the pixel, so it silently keeps the base value — class 0, ineligible.
+    # Hansen is masked over water and outside its land footprint, and slope
+    # is masked at nodata, so without this a single masked input anywhere
+    # collapses the whole classification to "everything ineligible" with no
+    # error raised. Unmasking to 0 makes "no data" mean False, which is the
+    # correct reading for every test below.
+    hansen = ee.Image(config.HANSEN_ASSET).clip(aoi).unmask(0)
     worldcover = (
-        ee.ImageCollection(config.WORLDCOVER_COLLECTION).first().clip(aoi)
+        ee.ImageCollection(config.WORLDCOVER_COLLECTION)
+        .mosaic()
+        .clip(aoi)
+        .unmask(0)
     )
 
     tree_cover_2000 = hansen.select("treecover2000")
@@ -93,7 +107,7 @@ def build_masks(
     # Not disqualifying, but a developer should go and look.
     wetland = worldcover.eq(config.WC_HERBACEOUS_WETLAND)
 
-    slope = ee.Terrain.slope(ee.Image(config.SRTM_ASSET)).clip(aoi)
+    slope = ee.Terrain.slope(ee.Image(config.SRTM_ASSET)).clip(aoi).unmask(0)
     steep = slope.gt(config.FLAG_SLOPE_DEGREES)
 
     # Loss just outside the window — a pixel that was forest 11 years ago
@@ -119,16 +133,40 @@ def build_masks(
 
     eligible = ineligible.Not().And(flagged.Not())
 
+    # Built by arithmetic rather than chained .where(). The three classes are
+    # mutually exclusive (proven exhaustively in
+    # tests/test_classification_logic.py), so summing their weighted masks
+    # gives exactly one of 0, 1 or 2 per pixel. Unlike .where(), this cannot
+    # silently skip a pixel if an input is masked.
     classified = (
-        ee.Image(config.CLASS_INELIGIBLE)
-        .where(flagged, config.CLASS_FLAGGED)
-        .where(eligible, config.CLASS_ELIGIBLE)
+        eligible.multiply(config.CLASS_ELIGIBLE)
+        .add(flagged.multiply(config.CLASS_FLAGGED))
         .clip(aoi)
         .rename("class")
     )
 
     return {
         "classified": classified,
+        # Each test on its own, before any combination. Reported as a
+        # coverage fraction so a test that fires across the whole area — the
+        # signature of a threshold or dataset problem — is visible rather
+        # than inferred.
+        "raw_tests": {
+            "currently_forest": currently_forest,
+            "was_forest_at_baseline": was_forest_2000,
+            "forest_lost_in_lookback": lost_in_window,
+            "built_up": built_up,
+            "permanent_water": permanent_water,
+            "snow_ice": snow_ice,
+            "mangroves": mangroves,
+            "wetland": wetland,
+            "steep_slope": steep,
+            "protected_area": protected,
+            "loss_near_window": loss_near_boundary,
+            "_combined_ineligible": ineligible,
+            "_combined_flagged": flagged,
+            "_combined_eligible": eligible,
+        },
         "reasons": {
             "currently_forest": currently_forest,
             "was_forest_at_baseline": was_forest_2000,
@@ -153,10 +191,13 @@ def _protected_area_mask(aoi: ee.Geometry) -> ee.Image:
     """
     try:
         wdpa = ee.FeatureCollection(config.WDPA_COLLECTION).filterBounds(aoi)
+        # paint() onto an empty image leaves unpainted pixels MASKED, so the
+        # unmask(0) is required for the same reason as the sources above.
         return (
-            ee.Image(0)
+            ee.Image()
             .byte()
             .paint(featureCollection=wdpa, color=1)
+            .unmask(0)
             .clip(aoi)
             .gt(0)
         )
@@ -213,9 +254,25 @@ def analyse(
         maxPixels=1e10,
     )
 
-    # ONE round trip for both.
+    # Coverage fraction of each individual test, for diagnostics.
+    raw_names = list(masks["raw_tests"].keys())
+    raw_stack = ee.Image.cat(
+        [masks["raw_tests"][name].rename(name) for name in raw_names]
+    )
+    raw_coverage = raw_stack.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=aoi,
+        scale=scale,
+        maxPixels=1e10,
+    )
+
+    # ONE round trip for all three.
     payload = ee.Dictionary(
-        {"classes": class_areas, "reasons": reason_areas}
+        {
+            "classes": class_areas,
+            "reasons": reason_areas,
+            "coverage": raw_coverage,
+        }
     ).getInfo()
 
     # Tiles for the map overlay. selfMask drops class 0 so the basemap shows
@@ -237,6 +294,14 @@ def analyse(
         name: (payload["reasons"].get(name) or 0.0) / 10_000.0
         for name in reason_names
     }
+    coverage = {
+        name: (
+            None
+            if payload["coverage"].get(name) is None
+            else round(payload["coverage"][name] * 100, 2)
+        )
+        for name in raw_names
+    }
 
     caveats = _build_caveats(project_start_year, masks["window_start"], scale)
 
@@ -246,6 +311,7 @@ def analyse(
         flagged_ha=round(by_class.get(config.CLASS_FLAGGED, 0.0), 1),
         ineligible_ha=round(by_class.get(config.CLASS_INELIGIBLE, 0.0), 1),
         reason_ha={k: round(v, 1) for k, v in reason_ha.items()},
+        test_coverage_pct=coverage,
         scale_m=scale,
         tile_url=tile_url,
         assumptions={

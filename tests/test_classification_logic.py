@@ -39,12 +39,12 @@ def classify(cond: dict) -> tuple[bool, bool, bool, int]:
     flagged = any(cond[name] for name in FLAG) and not ineligible
     eligible = (not ineligible) and (not flagged)
 
-    # Mirror of the ee.Image().where() chain.
-    value = CLASS_INELIGIBLE
-    if flagged:
-        value = CLASS_FLAGGED
-    if eligible:
-        value = CLASS_ELIGIBLE
+    # Mirror of the arithmetic class assignment in eligibility.build_masks():
+    #   eligible * 1  +  flagged * 2
+    # This is only correct because the classes are mutually exclusive — if
+    # both were ever true it would produce 3. The exclusivity check below is
+    # therefore what makes this form safe, not a nicety.
+    value = eligible * CLASS_ELIGIBLE + flagged * CLASS_FLAGGED
 
     return eligible, flagged, ineligible, value
 
@@ -87,6 +87,14 @@ def main() -> int:
         # Property 5: eligible only when nothing at all is set.
         if eligible and any(combo):
             failures.append(f"eligible despite active conditions: {cond}")
+
+        # Property 6: the arithmetic form never produces an out-of-range
+        # class. A 3 would mean eligible and flagged were both true, which
+        # the GEE code would silently render as an unmapped palette index.
+        if value not in (CLASS_INELIGIBLE, CLASS_ELIGIBLE, CLASS_FLAGGED):
+            failures.append(
+                f"arithmetic produced class {value}, outside 0-2, for {cond}"
+            )
 
         counts[value] += 1
 

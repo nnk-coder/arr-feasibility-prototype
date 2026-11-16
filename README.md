@@ -78,8 +78,13 @@ land eligible. The 10% default is therefore the conservative choice.
    project and enable the **Earth Engine API**
 3. For local development that is all you need — run `earthengine authenticate`
    once
-4. For deployment, create a service account with the **Earth Engine Resource
-   Viewer** role and download its JSON key
+4. For deployment, create a service account and download its JSON key. Grant
+   it **two** roles:
+   - **Earth Engine Resource Writer** — the Viewer role only grants
+     `earthengine.maps.get`, and rendering the eligibility overlay needs
+     `earthengine.maps.create`. The app never writes to your assets; Google
+     classifies tile generation as creating a map resource.
+   - **Service Usage Consumer** — permission to call APIs on the project.
 
 ### 2. Install and run
 

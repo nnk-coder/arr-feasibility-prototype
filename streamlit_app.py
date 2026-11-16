@@ -234,7 +234,9 @@ if run and boundary is not None:
         except GEEAuthError as exc:
             st.error(f"Earth Engine authentication failed.\n\n{exc}")
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
-            st.error(f"Analysis failed: {exc}")
+            from app.gee_init import safe_error
+
+            st.error(f"Analysis failed.\n\n{safe_error(exc)}")
 
 result = st.session_state.get("result")
 
@@ -326,6 +328,32 @@ with right:
             )
         else:
             st.caption("No exclusions detected across the project area.")
+
+        with st.expander("🔬 Test coverage (diagnostics)", expanded=False):
+            st.caption(
+                "Percentage of the area where each test fires, before the "
+                "classes are combined. A test at 100% across every boundary "
+                "you try is the signature of a threshold or dataset problem "
+                "rather than a real result."
+            )
+            cov = result.test_coverage_pct
+            cov_df = pd.DataFrame(
+                [
+                    {
+                        "Test": name.lstrip("_").replace("_", " ").capitalize(),
+                        "Coverage %": "no data" if pct is None else pct,
+                        "Combined": name.startswith("_"),
+                    }
+                    for name, pct in cov.items()
+                ]
+            )
+            st.dataframe(cov_df, hide_index=True, use_container_width=True)
+
+            if all(v in (None, 0) for k, v in cov.items() if not k.startswith("_")):
+                st.error(
+                    "Every individual test reads zero or no data. The source "
+                    "datasets are not returning values over this area."
+                )
 
         with st.expander("Assumptions applied", expanded=False):
             st.json(result.assumptions)
