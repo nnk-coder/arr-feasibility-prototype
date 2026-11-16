@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Sample ARR site — Bundelkhand, Madhya Pradesh</name>
+    <description>
+      Test boundary for the ARR feasibility tool. Approximately 500 ha of
+      degraded land in the Bundelkhand region, a recognised restoration
+      priority area. Coordinates are illustrative, not a real project site.
+    </description>
+    <Placemark>
+      <name>Project Area</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              79.000000,25.000000,0
+              79.022140,25.000000,0
+              79.022140,25.020160,0
+              79.000000,25.020160,0
+              79.000000,25.000000,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>
