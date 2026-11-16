@@ -58,6 +58,8 @@ def build_map(
     zoom: int | None = None,
     boundary_geojson: dict | None = None,
     tile_url: str | None = None,
+    lulc_tile_url: str | None = None,
+    imagery_tile_url: str | None = None,
     show_draw: bool = True,
 ) -> folium.Map:
     """Assemble the map with basemaps, boundary, and optional GEE overlay."""
@@ -94,6 +96,33 @@ def build_map(
                 "fillOpacity": 0.0,
                 "dashArray": "6,4",
             },
+        ).add_to(fmap)
+
+    # Recent imagery sits below the analysis overlays, as context.
+    if imagery_tile_url:
+        folium.raster_layers.TileLayer(
+            tiles=imagery_tile_url,
+            attr="Copernicus Sentinel-2 via Google Earth Engine",
+            name="Recent Sentinel-2",
+            overlay=True,
+            control=True,
+            show=False,
+            opacity=1.0,
+            max_native_zoom=MAX_NATIVE_ZOOM,
+            max_zoom=MAX_ZOOM,
+        ).add_to(fmap)
+
+    if lulc_tile_url:
+        folium.raster_layers.TileLayer(
+            tiles=lulc_tile_url,
+            attr="ESA WorldCover via Google Earth Engine",
+            name="Land cover",
+            overlay=True,
+            control=True,
+            show=False,
+            opacity=0.75,
+            max_native_zoom=MAX_NATIVE_ZOOM,
+            max_zoom=MAX_ZOOM,
         ).add_to(fmap)
 
     if tile_url:

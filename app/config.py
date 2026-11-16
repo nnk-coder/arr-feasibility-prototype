@@ -16,6 +16,11 @@ try:
 except ImportError:  # pragma: no cover
     pass
 
+# Bumped whenever the interface between streamlit_app.py and app/ changes.
+# Surfaced in the diagnostics panel so a partial deployment is visible at a
+# glance rather than diagnosed from an ImportError.
+APP_VERSION = "1.0-full"
+
 # ---------------------------------------------------------------- Earth Engine
 
 GEE_PROJECT = os.getenv("GEE_PROJECT", "")

@@ -23,6 +23,7 @@ import ee
 from app import config
 from app.config import PARCEL_CLASS_MULTIPLIER
 from app.gee_init import initialize
+from app import lulc as lulc_mod
 from app.validation import check_band_name
 
 
@@ -36,6 +37,8 @@ class EligibilityResult:
     ineligible_ha: float
     reason_ha: dict[str, float]
     test_coverage_pct: dict[str, float | None]
+    lulc_rows: list = field(default_factory=list)
+    lulc_tile_url: str = ""
     scale_m: int
     tile_url: str
     assumptions: dict = field(default_factory=dict)
@@ -273,16 +276,30 @@ def analyse(
     )
 
     # ONE round trip for all three.
+    lulc_img = lulc_mod.build_layer(aoi, ee)
+    lulc_hist = lulc_mod.histogram_reducer(lulc_img, aoi, scale, ee)
+
     payload = ee.Dictionary(
         {
             "classes": class_areas,
             "reasons": reason_areas,
             "coverage": raw_coverage,
+            "lulc": lulc_hist,
         }
     ).getInfo()
 
     # Tiles for the map overlay. selfMask drops class 0 so the basemap shows
     # through on ineligible land rather than covering it in grey.
+
+    lulc_rows = lulc_mod.summarise(
+        (payload.get("lulc") or {}).get("landcover", {}), area_ha
+    )
+    lulc_tile_url = (
+        lulc_img.selfMask()
+        .getMapId({"min": 10, "max": 100, "palette": lulc_mod.palette_list()})["tile_fetcher"]
+        .url_format
+    )
+
     mapid = classified.selfMask().getMapId(
         {
             "min": config.CLASS_INELIGIBLE,
@@ -318,6 +335,8 @@ def analyse(
         ineligible_ha=round(by_class.get(config.CLASS_INELIGIBLE, 0.0), 1),
         reason_ha={k: round(v, 1) for k, v in reason_ha.items()},
         test_coverage_pct=coverage,
+        lulc_rows=lulc_rows,
+        lulc_tile_url=lulc_tile_url,
         scale_m=scale,
         tile_url=tile_url,
         assumptions={
@@ -471,13 +490,27 @@ def analyse_by_parcel(
         reducer=ee.Reducer.mean(), geometry=aoi, scale=scale, maxPixels=1e10
     )
 
+    lulc_img = lulc_mod.build_layer(aoi, ee)
+    lulc_hist = lulc_mod.histogram_reducer(lulc_img, aoi, scale, ee)
+
     payload = ee.Dictionary(
         {
             "grouped": grouped,
             "reasons": reason_areas,
             "coverage": raw_coverage,
+            "lulc": lulc_hist,
         }
     ).getInfo()
+
+
+    lulc_rows = lulc_mod.summarise(
+        (payload.get("lulc") or {}).get("landcover", {}), total_area_ha
+    )
+    lulc_tile_url = (
+        lulc_img.selfMask()
+        .getMapId({"min": 10, "max": 100, "palette": lulc_mod.palette_list()})["tile_fetcher"]
+        .url_format
+    )
 
     tile_url = classified.selfMask().getMapId(
         {
@@ -536,6 +569,8 @@ def analyse_by_parcel(
             for n in reason_names
         },
         test_coverage_pct=coverage,
+        lulc_rows=lulc_rows,
+        lulc_tile_url=lulc_tile_url,
         scale_m=scale,
         tile_url=tile_url,
         assumptions={

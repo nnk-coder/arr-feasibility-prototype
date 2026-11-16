@@ -1,4 +1,4 @@
-# ARR Feasibility Analysis — Phase 2 (India)
+# ARR Feasibility Analysis — v1.0 (India)
 
 Screens a land parcel for Afforestation, Reforestation and Revegetation
 eligibility under Verra VM0047. Upload a boundary, get back a per-pixel map of
@@ -11,20 +11,31 @@ threshold that India reports under to UNFCCC and FAO.
 
 ## What it does
 
-- Loads project parcels from KML, KMZ, GeoJSON, or zipped Shapefiles — several
-  files at once — and from shapes drawn on the map. Files and drawings stack.
-- Names each parcel from its KML `<name>` or GeoJSON properties, falling back
-  to an index
-- Runs a three-class eligibility mask in Google Earth Engine — eligible,
-  flagged for review, ineligible
-- Scores parcels merged, or each one separately so you can see which to drop
-- Renders the mask as a coloured overlay on satellite imagery
-- Reports hectares in each class, plus a filterable breakdown of *why* land
-  was excluded
-- Prints every assumption and limitation alongside the result
+Screens land for Afforestation, Reforestation and Revegetation eligibility
+under Verra VM0047, estimates the carbon it could generate, and says plainly
+what would stop the project.
 
-Not yet built: the LULC classification layer (Phase 3) and the carbon credit
-estimator (Phase 4).
+1. **Parcels in** — KML, KMZ, GeoJSON or zipped Shapefiles, several at once,
+   plus shapes drawn on the map. Files and drawings stack. Each parcel takes
+   its name from the file where one exists.
+2. **Eligibility** — a per-pixel three-class mask (eligible / flagged /
+   ineligible) rendered as a map overlay, with a breakdown of what excluded
+   each hectare.
+3. **Land cover** — ESA WorldCover at 10 m with the official palette, an area
+   breakdown, and a note on what each class means for ARR.
+4. **Carbon** — a low / central / high credit trajectory over the crediting
+   period, net of baseline, leakage, uncertainty and non-permanence buffer.
+5. **Summary** — a written feasibility assessment built from the computed
+   figures. Works with no API key; richer with one.
+6. **Export** — JSON, GeoJSON parcels with their scores, and CSV series.
+
+### Governing principle
+
+**Code computes, AI interprets.** Every auditable number comes from Earth
+Engine or deterministic Python. The language model, when used at all,
+receives those numbers and writes prose around them — it never produces a
+figure. `tests/test_narrative.py` enforces this by checking that every number
+in the generated report traces back to an input.
 
 ### Per-parcel scoring
 
@@ -81,6 +92,30 @@ Two ship, and they give different answers:
 
 A *lower* canopy threshold classifies more land as forest, which makes *less*
 land eligible. The 10% default is therefore the conservative choice.
+
+### Carbon estimate
+
+Two methodological points drive the design, both places feasibility estimates
+commonly go wrong.
+
+**Density does not multiply the rate.** The sequestration rate is per
+hectare, so multiplying by trees per hectare would double count. Density
+instead drives a stocking adequacy check — below roughly 400 effective
+trees/ha the stand may never meet the forest definition at all — and a yield
+scalar against the density the rate factor assumes. Survival is folded into
+that scalar rather than applied separately, and the scalar is capped at 1.0,
+because over-planting raises mortality rather than yield.
+
+**The growth curve is conditional.** Published per-hectare factors are usually
+a mean annual increment, which already averages in the slow establishment
+years. Applying a sigmoid on top of an MAI figure discounts the ramp-up twice.
+The curve therefore only applies when the rate is a peak/mature figure. The
+default is MAI with no curve, which fails conservative rather than inflated.
+
+The range spans survival (65/80/92%), non-permanence buffer (25/15/10%,
+following the VCS AFOLU Non-Permanence Risk Tool), uncertainty and leakage.
+Expect roughly a 2× spread between low and high — that gap is real, and
+showing it is what keeps a feasibility study credible.
 
 ---
 
@@ -140,11 +175,17 @@ app/
   validation.py    Pure checks - band names, credential keys, error scrubbing.
                    No third-party imports, so its tests run anywhere.
   config.py        Dataset pins, India presets, adaptive scale, class palette
+  carbon.py        Credit estimator - pure Python, no GEE, no LLM
+  lulc.py          Land cover palette, labels, ARR relevance, summarisation
+  narrative.py     Feasibility report - deterministic, optional Gemini
+  imagery.py       Date-filtered Sentinel-2 composite
   geometry.py      Boundary parsing, validation, equal-area hectares
   gee_init.py      Earth Engine auth — service account and local paths
   eligibility.py   The three-class mask, tile rendering, area reduction
   mapping.py       Folium map, basemaps, legend
 streamlit_app.py   UI
+sync_to_repo.sh    Copies this release into a git repo, replacing whole
+                   directories so no stale file survives
 tests/
   test_classification_logic.py   Exhaustive class-algebra check
 samples/

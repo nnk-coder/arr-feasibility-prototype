@@ -17,13 +17,39 @@ import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
 
+from app import carbon as carbon_mod
 from app import config
-from app.geometry import (
-    BoundaryError,
-    build_boundary_from_parcels,
-    parcels_from_drawings,
-    parcels_from_file,
-)
+
+# A partial update — streamlit_app.py replaced but app/ left behind — fails
+# here with an opaque ImportError that Streamlit Cloud redacts, sending you
+# to the logs to find out which name was missing. Catching it names the
+# actual problem instead.
+try:
+    from app.geometry import (
+        BoundaryError,
+        build_boundary_from_parcels,
+        parcels_from_drawings,
+        parcels_from_file,
+    )
+except ImportError as exc:
+    st.error(
+        "### App files are out of sync\n\n"
+        f"`streamlit_app.py` expects a newer `app/geometry.py` than the one "
+        f"deployed, so it could not import what it needs:\n\n"
+        f"> {exc}\n\n"
+        "This happens when some files were updated and others were not — "
+        "usually a copy that skipped the `app/` folder.\n\n"
+        "**To fix:** replace the whole `app/` directory, not just the files "
+        "at the repository root, then commit and push:\n\n"
+        "```bash\n"
+        "rm -rf app\n"
+        "cp -R /path/to/unzipped/arr-feasibility/app ./app\n"
+        "git add -A && git commit -m 'Sync app modules' && git push\n"
+        "```\n\n"
+        f"Expected app version: `{config.APP_VERSION}`"
+    )
+    st.stop()
+
 from app.mapping import build_map
 
 st.set_page_config(
@@ -52,7 +78,10 @@ st.session_state.setdefault("parcels", [])
 
 
 def _clear_results() -> None:
-    for key in ("result", "parcel_results", "result_key", "result_parcel_key"):
+    for key in (
+        "result", "parcel_results", "result_key", "result_parcel_key",
+        "carbon", "narrative", "narrative_source", "imagery_tile", "imagery_meta",
+    ):
         st.session_state.pop(key, None)
 
 
@@ -109,6 +138,45 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.markdown("### Carbon estimate")
+    rate_type = st.radio(
+        "Sequestration rate type",
+        list(carbon_mod.RATE_TYPES.keys()),
+        index=0,
+        help=(
+            "Most published per-hectare factors are a mean annual increment, "
+            "which already averages in the slow establishment years."
+        ),
+    )
+    st.caption(carbon_mod.RATE_TYPES[rate_type]["help"])
+
+    rate_per_ha = st.number_input(
+        "Rate (tCO\u2082e/ha/yr)", min_value=0.0, max_value=50.0,
+        value=8.0, step=0.5,
+    )
+    crediting_years = st.slider("Crediting period (years)", 10, 40, 30)
+    density = st.number_input(
+        "Planting density (trees/ha)", min_value=100, max_value=5000,
+        value=1100, step=50,
+        help=(
+            "Does not multiply the per-hectare rate. Drives a stocking "
+            "adequacy check and a yield scalar against the reference density."
+        ),
+    )
+    reference_density = st.number_input(
+        "Reference density assumed by the rate (trees/ha)",
+        min_value=100, max_value=5000, value=carbon_mod.DEFAULT_REFERENCE_DENSITY,
+        step=50,
+    )
+
+    st.markdown("---")
+    st.markdown("### Imagery")
+    show_recent = st.checkbox("Add recent Sentinel-2 layer", value=False)
+    imagery_months = st.slider(
+        "Imagery window (months back)", 1, 24, 6, disabled=not show_recent
+    )
+
+    st.markdown("---")
     st.markdown("### Scoring")
     per_parcel = st.checkbox(
         "Score each parcel separately",
@@ -130,6 +198,7 @@ with st.sidebar:
             from app.gee_init import describe_config
 
             cfg = describe_config()
+            cfg["app_version"] = config.APP_VERSION
             if cfg["credentials_source"] == "Streamlit secrets":
                 st.success("Credentials: Streamlit secrets")
             elif cfg["credentials_source"] == "not set":
@@ -287,6 +356,12 @@ if boundary is not None:
                 "lookback": lookback_years,
                 "start": int(project_start_year),
                 "per_parcel": per_parcel,
+                "rate": rate_per_ha,
+                "rate_type": rate_type,
+                "years": crediting_years,
+                "density": density,
+                "ref_density": reference_density,
+                "imagery": (show_recent, imagery_months),
             },
             sort_keys=True,
         ).encode()
@@ -328,6 +403,47 @@ if run and boundary is not None:
                     forest_definition_name=definition_name,
                 )
                 st.session_state["parcel_results"] = None
+        # Carbon, narrative and imagery all derive from the eligibility
+        # result, so they run after it and reuse its figures. None of them
+        # recompute an area.
+        with st.spinner("Estimating carbon\u2026"):
+            carbon_result = carbon_mod.estimate(
+                eligible_ha=combined.eligible_ha,
+                rate_per_ha_yr=rate_per_ha,
+                rate_type=rate_type,
+                crediting_years=crediting_years,
+                density=int(density),
+                reference_density=int(reference_density),
+            )
+
+        with st.spinner("Writing summary\u2026"):
+            from app import narrative as narrative_mod
+
+            text, source = narrative_mod.generate(
+                combined,
+                carbon_result,
+                st.session_state.get("parcel_results"),
+                location_name=f"{boundary.part_count} parcel(s)",
+            )
+
+        if show_recent:
+            try:
+                import ee
+
+                from app import imagery as imagery_mod
+
+                url, meta = imagery_mod.composite_tile_url(
+                    ee.Geometry(boundary.geojson), imagery_months, ee
+                )
+                st.session_state["imagery_tile"] = url
+                st.session_state["imagery_meta"] = meta
+            except Exception:
+                # Imagery is context, not a result. Never fail the run for it.
+                st.session_state["imagery_tile"] = None
+
+        st.session_state["carbon"] = carbon_result
+        st.session_state["narrative"] = text
+        st.session_state["narrative_source"] = source
         st.session_state["result"] = combined
         st.session_state["result_key"] = run_key
     except GEEAuthError as exc:
@@ -339,6 +455,9 @@ if run and boundary is not None:
 
 result = st.session_state.get("result")
 parcel_results = st.session_state.get("parcel_results")
+carbon_result = st.session_state.get("carbon")
+narrative_text = st.session_state.get("narrative")
+narrative_source = st.session_state.get("narrative_source")
 
 # -------------------------------------------------------------------- map
 
@@ -349,6 +468,8 @@ with left:
         zoom=12 if boundary else None,
         boundary_geojson=boundary.geojson if boundary else None,
         tile_url=result.tile_url if result else None,
+        lulc_tile_url=result.lulc_tile_url if result else None,
+        imagery_tile_url=st.session_state.get("imagery_tile"),
         show_draw=True,
     )
     st.session_state["map_state"] = st_folium(
@@ -495,6 +616,103 @@ with right:
         else:
             st.caption("No exclusions detected across the project area.")
 
+        # ------------------------------------------------ land cover
+        if getattr(result, "lulc_rows", None):
+            st.markdown("#### Land cover")
+            lulc_df = pd.DataFrame(
+                [
+                    {
+                        "Class": r["label"],
+                        "Hectares": r["hectares"],
+                        "%": r["percent"],
+                        "For ARR": r["arr_note"],
+                    }
+                    for r in result.lulc_rows
+                ]
+            )
+            st.dataframe(
+                lulc_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "%": st.column_config.ProgressColumn(
+                        "%", min_value=0, max_value=100, format="%.1f%%"
+                    )
+                },
+            )
+            st.bar_chart(
+                lulc_df.set_index("Class")["Hectares"], horizontal=True
+            )
+            st.caption(
+                "ESA WorldCover "
+                f"{result.assumptions.get('worldcover_epoch')} \u00b7 toggle the "
+                "**Land cover** overlay in the map layer control to see it "
+                "spatially."
+            )
+
+        # --------------------------------------------------- carbon
+        if carbon_result is not None:
+            st.markdown("#### Carbon potential")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Low", f"{carbon_result.scenarios['low'].total_net:,.0f} t")
+            c2.metric(
+                "Central",
+                f"{carbon_result.central.total_net:,.0f} t",
+                f"{carbon_result.central.mean_annual:,.0f} t/yr",
+            )
+            c3.metric("High", f"{carbon_result.scenarios['high'].total_net:,.0f} t")
+
+            st.caption(
+                f"Net tCO\u2082e over {carbon_result.crediting_years} years, after "
+                "baseline, leakage, uncertainty and non-permanence buffer "
+                f"deductions \u00b7 range spread {carbon_result.range_ratio:.1f}\u00d7"
+            )
+
+            years = list(range(1, carbon_result.crediting_years + 1))
+            curve = pd.DataFrame(
+                {
+                    "Low": carbon_result.scenarios["low"].cumulative_net,
+                    "Central": carbon_result.central.cumulative_net,
+                    "High": carbon_result.scenarios["high"].cumulative_net,
+                },
+                index=years,
+            )
+            curve.index.name = "Year"
+            st.line_chart(curve)
+
+            status = carbon_result.stocking["status"]
+            message = carbon_result.stocking["message"]
+            if status == "inadequate":
+                st.error(f"**Stocking:** {message}")
+            elif status == "high":
+                st.warning(f"**Stocking:** {message}")
+            else:
+                st.caption(f"Stocking: {message}")
+
+            if not carbon_result.assumptions["growth_curve_applied"]:
+                st.caption(
+                    "No growth curve applied \u2014 the rate is a mean annual "
+                    "increment, which already averages the establishment "
+                    "years. Applying one would discount them twice."
+                )
+
+        # ------------------------------------------------ narrative
+        if narrative_text:
+            st.markdown("#### Feasibility summary")
+            if narrative_source == "gemini":
+                st.caption(
+                    "Generated commentary (Gemini). Every figure comes from "
+                    "the computed results above; the model does not produce "
+                    "numbers."
+                )
+            else:
+                st.caption(
+                    "Generated from the computed results. Set GEMINI_API_KEY "
+                    "in secrets for a richer written assessment."
+                )
+            st.markdown(narrative_text)
+
         with st.expander("🔬 Test coverage (diagnostics)", expanded=False):
             st.caption(
                 "Percentage of the area where each test fires, before the "
@@ -566,10 +784,101 @@ with right:
                 for p in parcel_results
             ]
 
-        st.download_button(
-            "📥 Download result as JSON",
+        if carbon_result is not None:
+            export["carbon"] = {
+                "rate_per_ha_yr": carbon_result.rate_per_ha_yr,
+                "rate_type": carbon_result.rate_type,
+                "crediting_years": carbon_result.crediting_years,
+                "stocking": carbon_result.stocking,
+                "assumptions": carbon_result.assumptions,
+                "scenarios": {
+                    k: {
+                        "total_net_tco2e": v.total_net,
+                        "mean_annual_tco2e": round(v.mean_annual, 1),
+                        "density_scalar": v.density_scalar,
+                        "annual_net": v.annual_net,
+                        "cumulative_net": v.cumulative_net,
+                    }
+                    for k, v in carbon_result.scenarios.items()
+                },
+            }
+        if getattr(result, "lulc_rows", None):
+            export["land_cover"] = result.lulc_rows
+        if narrative_text:
+            export["narrative"] = narrative_text
+            export["narrative_source"] = narrative_source
+
+        st.markdown("#### Export")
+        d1, d2 = st.columns(2)
+
+        d1.download_button(
+            "📥 Full result (JSON)",
             json.dumps(export, indent=2),
-            file_name="arr_eligibility.json",
+            file_name="arr_feasibility.json",
             mime="application/json",
             use_container_width=True,
         )
+
+        # Parcel boundaries as GeoJSON, so the eligible area can go straight
+        # into QGIS or a PDD rather than being re-digitised.
+        if boundary is not None:
+            fc = {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "properties": {
+                            "name": p.name,
+                            "source": p.source,
+                            "footprint_ha": round(p.area_ha, 1),
+                            **(
+                                {
+                                    "eligible_ha": pr.eligible_ha,
+                                    "flagged_ha": pr.flagged_ha,
+                                    "ineligible_ha": pr.ineligible_ha,
+                                    "eligible_pct": round(pr.eligible_pct, 1),
+                                }
+                                if parcel_results
+                                and (pr := next(
+                                    (x for x in parcel_results if x.name == p.name), None
+                                ))
+                                else {}
+                            ),
+                        },
+                        "geometry": p.geojson,
+                    }
+                    for p in boundary.parcels
+                ],
+            }
+            d2.download_button(
+                "🗺 Parcels (GeoJSON)",
+                json.dumps(fc, indent=2),
+                file_name="arr_parcels.geojson",
+                mime="application/geo+json",
+                use_container_width=True,
+            )
+
+        csv_parts = []
+        if carbon_result is not None:
+            rows = ["year,low_tco2e,central_tco2e,high_tco2e"]
+            for i, year in enumerate(range(1, carbon_result.crediting_years + 1)):
+                rows.append(
+                    f"{year},"
+                    f"{carbon_result.scenarios['low'].cumulative_net[i]},"
+                    f"{carbon_result.central.cumulative_net[i]},"
+                    f"{carbon_result.scenarios['high'].cumulative_net[i]}"
+                )
+            csv_parts.append(("Credit series (CSV)", "\n".join(rows), "arr_credits.csv"))
+        if getattr(result, "lulc_rows", None):
+            rows = ["class,hectares,percent"]
+            for r in result.lulc_rows:
+                rows.append(f"\"{r['label']}\",{r['hectares']},{r['percent']}")
+            csv_parts.append(("Land cover (CSV)", "\n".join(rows), "arr_landcover.csv"))
+
+        if csv_parts:
+            cols = st.columns(len(csv_parts))
+            for col, (label, data, fname) in zip(cols, csv_parts):
+                col.download_button(
+                    f"📄 {label}", data, file_name=fname,
+                    mime="text/csv", use_container_width=True,
+                )

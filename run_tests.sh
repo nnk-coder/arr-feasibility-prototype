@@ -23,6 +23,9 @@ run "Classification logic"    tests/test_classification_logic.py
 run "Credential validation"   tests/test_credential_validation.py
 run "Band names"              tests/test_band_names.py
 run "Parcel grouping key"     tests/test_parcel_grouping.py
+run "Carbon maths"            tests/test_carbon_maths.py
+run "Narrative traceability"  tests/test_narrative.py
+run "LULC summarisation"      tests/test_lulc.py
 
 # --- dependency preflight ---------------------------------------------------
 missing=$(python3 -I - <<'PY'
