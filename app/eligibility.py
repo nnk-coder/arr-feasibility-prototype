@@ -13,6 +13,8 @@ band catches land that was forest until recently. All three are required.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -49,6 +51,22 @@ class EligibilityResult:
     def upside_ha(self) -> float:
         """Eligible plus flagged — the ceiling if everything flagged clears."""
         return self.eligible_ha + self.flagged_ha
+
+
+# Earth Engine band names must start with a letter and contain only letters,
+# digits and underscores. A violation is only reported when the graph is
+# evaluated on the server, so names are checked locally first.
+_BAND_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def check_band_name(name: str) -> str:
+    """Validate a band name, raising locally rather than at evaluation time."""
+    if not _BAND_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid Earth Engine band name {name!r}. Band names must start "
+            "with a letter and contain only letters, digits and underscores."
+        )
+    return name
 
 
 def _loss_year_code(year: int) -> int:
@@ -163,9 +181,9 @@ def build_masks(
             "steep_slope": steep,
             "protected_area": protected,
             "loss_near_window": loss_near_boundary,
-            "_combined_ineligible": ineligible,
-            "_combined_flagged": flagged,
-            "_combined_eligible": eligible,
+            "combined_ineligible": ineligible,
+            "combined_flagged": flagged,
+            "combined_eligible": eligible,
         },
         "reasons": {
             "currently_forest": currently_forest,
@@ -244,7 +262,7 @@ def analyse(
     # one reduceRegion per reason.
     reason_names = list(masks["reasons"].keys())
     reason_stack = ee.Image.cat(
-        [masks["reasons"][name].rename(name) for name in reason_names]
+        [masks["reasons"][name].rename(check_band_name(name)) for name in reason_names]
     ).multiply(ee.Image.pixelArea())
 
     reason_areas = reason_stack.reduceRegion(
@@ -257,7 +275,7 @@ def analyse(
     # Coverage fraction of each individual test, for diagnostics.
     raw_names = list(masks["raw_tests"].keys())
     raw_stack = ee.Image.cat(
-        [masks["raw_tests"][name].rename(name) for name in raw_names]
+        [masks["raw_tests"][name].rename(check_band_name(name)) for name in raw_names]
     )
     raw_coverage = raw_stack.reduceRegion(
         reducer=ee.Reducer.mean(),

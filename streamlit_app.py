@@ -340,16 +340,16 @@ with right:
             cov_df = pd.DataFrame(
                 [
                     {
-                        "Test": name.lstrip("_").replace("_", " ").capitalize(),
+                        "Test": name.replace("combined_", "").replace("_", " ").capitalize(),
                         "Coverage %": "no data" if pct is None else pct,
-                        "Combined": name.startswith("_"),
+                        "Combined": name.startswith("combined_"),
                     }
                     for name, pct in cov.items()
                 ]
             )
             st.dataframe(cov_df, hide_index=True, use_container_width=True)
 
-            if all(v in (None, 0) for k, v in cov.items() if not k.startswith("_")):
+            if all(v in (None, 0) for k, v in cov.items() if not k.startswith("combined_")):
                 st.error(
                     "Every individual test reads zero or no data. The source "
                     "datasets are not returning values over this area."

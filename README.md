@@ -162,8 +162,10 @@ These are printed in the app alongside every result, not buried here.
 ## Testing
 
 ```bash
-python3 tests/test_classification_logic.py
+./run_tests.sh
 ```
+
+Runs every offline check — none need Earth Engine credentials.
 
 Checks all 2,048 combinations of the eleven per-pixel conditions and asserts
 that the three classes stay mutually exclusive and exhaustive. Overlapping
