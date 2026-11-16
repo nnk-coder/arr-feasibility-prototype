@@ -13,113 +13,24 @@ import re
 import ee
 
 from app.config import GEE_CREDENTIALS_JSON, GEE_PROJECT
-
-_initialised = False
-
-# Fields a usable service account key must carry.
-REQUIRED_KEY_FIELDS = (
-    "type",
-    "project_id",
-    "private_key",
-    "client_email",
-    "token_uri",
+from app.validation import (
+    GEEAuthError,
+    MIN_PRIVATE_KEY_CHARS,
+    looks_like_placeholder as _looks_like_placeholder,
+    scrub as _scrub,
+    validate_service_account_key,
 )
 
-# A real RSA 2048 private key in PEM form is around 1,700 characters. Anything
-# much shorter is a truncated paste or a placeholder.
-MIN_PRIVATE_KEY_CHARS = 800
+__all__ = [
+    "GEEAuthError",
+    "initialize",
+    "is_initialised",
+    "describe_config",
+    "safe_error",
+    "validate_service_account_key",
+]
 
-
-class GEEAuthError(RuntimeError):
-    """Raised when Earth Engine cannot be initialised."""
-
-
-def _looks_like_placeholder(value: str) -> bool:
-    """Detect template text that was pasted without substitution."""
-    stripped = str(value).strip()
-    if not stripped:
-        return True
-    # Bare ellipsis, or a value that is only dots and whitespace.
-    if set(stripped) <= {".", " "}:
-        return True
-    # Values ending in an ellipsis, e.g. "gee-service@..."
-    if stripped.endswith("..."):
-        return True
-    if stripped.startswith("your-") or stripped.startswith("<"):
-        return True
-    return False
-
-
-def validate_service_account_key(key: dict) -> None:
-    """Check a parsed service account key before handing it to Earth Engine.
-
-    Earth Engine's own failure for a bad key echoes the entire credential dict
-    — private key included — into its exception message. Catching the common
-    mistakes here means the user gets a precise, safe error instead.
-
-    No message raised from this function contains key material.
-    """
-    if not isinstance(key, dict):
-        raise GEEAuthError(
-            "GEE_CREDENTIALS_JSON did not parse to a JSON object. It must be "
-            "the contents of the service account key file."
-        )
-
-    missing = [f for f in REQUIRED_KEY_FIELDS if f not in key]
-    if missing:
-        raise GEEAuthError(
-            f"Service account key is missing: {', '.join(missing)}.\n\n"
-            "Use the whole downloaded .json file, not an excerpt."
-        )
-
-    if key.get("type") != "service_account":
-        raise GEEAuthError(
-            f"Key has type '{key.get('type')}', expected 'service_account'. "
-            "This looks like an OAuth client key rather than a service "
-            "account key — download the right one from IAM & Admin → "
-            "Service Accounts → Keys."
-        )
-
-    # Placeholder detection, reported by field name only.
-    placeholders = [
-        field
-        for field in ("project_id", "client_email", "private_key_id")
-        if field in key and _looks_like_placeholder(key[field])
-    ]
-    private_key = str(key.get("private_key", ""))
-    if _looks_like_placeholder(private_key) or "..." in private_key:
-        placeholders.append("private_key")
-
-    if placeholders:
-        raise GEEAuthError(
-            "The credentials still contain template placeholders rather than "
-            f"real values: {', '.join(sorted(set(placeholders)))}.\n\n"
-            "Open the .json key file you downloaded from Google Cloud, copy "
-            "its entire contents, and paste that in place of the example. "
-            "Do not retype or edit it by hand."
-        )
-
-    if "BEGIN PRIVATE KEY" not in private_key:
-        raise GEEAuthError(
-            "The private_key field does not contain a PEM private key. "
-            "Paste the key file contents unmodified."
-        )
-
-    if len(private_key) < MIN_PRIVATE_KEY_CHARS:
-        raise GEEAuthError(
-            f"The private_key field is only {len(private_key)} characters; a "
-            f"real key is around 1,700. It was probably truncated when "
-            "pasted. Copy the whole .json file contents again."
-        )
-
-    if "\\n" in private_key and "\n" not in private_key:
-        raise GEEAuthError(
-            "The private key's line breaks arrived as literal backslash-n "
-            "rather than newlines.\n\n"
-            "In Streamlit secrets, wrap the JSON in SINGLE quotes, not "
-            "double. TOML processes escape sequences inside double-quoted "
-            "strings, which corrupts the key."
-        )
+_initialised = False
 
 
 def _from_streamlit_secrets(name: str) -> str:
@@ -316,13 +227,6 @@ def is_initialised() -> bool:
     return _initialised
 
 
-# Anything resembling PEM key material, so it can be stripped before an error
-# reaches the screen or the deployment logs.
-_PEM_PATTERN = re.compile(
-    r"-----BEGIN[^-]*-----.*?-----END[^-]*-----", re.DOTALL
-)
-
-
 def safe_error(exc: Exception) -> str:
     """Render an exception for display with key material removed.
 
@@ -330,13 +234,8 @@ def safe_error(exc: Exception) -> str:
     exception messages. Any error surfaced in the UI passes through here, so a
     future code path cannot put a private key on screen by accident.
     """
-    text = str(exc)
-    text = _PEM_PATTERN.sub("[PRIVATE KEY REDACTED]", text)
-    # Catch a bare key body that lost its PEM header in formatting.
-    text = re.sub(r"[A-Za-z0-9+/]{200,}={0,2}", "[REDACTED]", text)
-
-    hint = _hint_for(text)
-    return f"{text}{hint}"
+    text = _scrub(str(exc))
+    return f"{text}{_hint_for(text)}"
 
 
 def _hint_for(message: str) -> str:

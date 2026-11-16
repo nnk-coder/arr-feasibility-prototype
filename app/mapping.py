@@ -13,6 +13,21 @@ from folium.plugins import Draw
 
 from app import config
 
+# Zoom beyond which a layer has no cached tiles.
+#
+# Requesting a tile past a service's cached levels returns Esri's "no data
+# available" image rather than an error, so the map simply goes blank as the
+# user zooms in to inspect a parcel. Setting max_native_zoom makes Leaflet
+# upscale the deepest real tile instead of asking for one that does not
+# exist, which keeps the layer usable at any zoom.
+#
+# World_Terrain_Base was the layer that failed this way: it is a legacy
+# service with a shallow cache. World_Topo_Map replaces it — a full zoom
+# range, and more useful here anyway, since it carries contours, roads and
+# settlement names that matter when planning site access.
+MAX_NATIVE_ZOOM = 19
+MAX_ZOOM = 22
+
 BASEMAPS = {
     "Satellite (Esri)": {
         "tiles": (
@@ -27,12 +42,12 @@ BASEMAPS = {
         "attr": None,
         "default": False,
     },
-    "Terrain (Esri)": {
+    "Topographic (Esri)": {
         "tiles": (
             "https://server.arcgisonline.com/ArcGIS/rest/services/"
-            "World_Terrain_Base/MapServer/tile/{z}/{y}/{x}"
+            "World_Topo_Map/MapServer/tile/{z}/{y}/{x}"
         ),
-        "attr": "Esri",
+        "attr": "Esri, HERE, Garmin, Intermap, USGS",
         "default": False,
     },
 }
@@ -54,6 +69,7 @@ def build_map(
         zoom_start=zoom,
         tiles=None,
         control_scale=True,
+        max_zoom=MAX_ZOOM,
     )
 
     for name, spec in BASEMAPS.items():
@@ -64,6 +80,8 @@ def build_map(
             overlay=False,
             control=True,
             show=spec["default"],
+            max_native_zoom=MAX_NATIVE_ZOOM,
+            max_zoom=MAX_ZOOM,
         ).add_to(fmap)
 
     if boundary_geojson:
@@ -86,6 +104,8 @@ def build_map(
             overlay=True,
             control=True,
             opacity=0.75,
+            max_native_zoom=MAX_NATIVE_ZOOM,
+            max_zoom=MAX_ZOOM,
         ).add_to(fmap)
 
     if show_draw:

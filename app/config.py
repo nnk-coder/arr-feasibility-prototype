@@ -6,9 +6,15 @@ here, so it can be surfaced in the output rather than buried in the logic.
 
 import os
 
-from dotenv import load_dotenv
+# python-dotenv is a local-development convenience only. Keeping it optional
+# means config.py imports with nothing installed, which is what lets the pure
+# logic tests run on a fresh checkout.
+try:
+    from dotenv import load_dotenv
 
-load_dotenv()
+    load_dotenv()
+except ImportError:  # pragma: no cover
+    pass
 
 # ---------------------------------------------------------------- Earth Engine
 
@@ -140,6 +146,11 @@ CLASS_ELIGIBLE = 1
 CLASS_FLAGGED = 2
 
 CLASS_PALETTE = ["#9E9E9E", "#2C5F2D", "#F5A623"]  # index == class code
+
+# Per-parcel scoring packs the parcel id and class code into one integer so a
+# single grouped reduction returns every (parcel, class) area. The class code
+# occupies the units digit, so this must exceed the highest class code.
+PARCEL_CLASS_MULTIPLIER = 10
 CLASS_LABELS = {
     CLASS_INELIGIBLE: "Ineligible",
     CLASS_ELIGIBLE: "Eligible",

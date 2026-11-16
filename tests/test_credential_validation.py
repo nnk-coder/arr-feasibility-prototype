@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-from app.gee_init import GEEAuthError, validate_service_account_key  # noqa: E402
+from app.validation import GEEAuthError, validate_service_account_key  # noqa: E402
 
 # A fake but structurally realistic private key, long enough to pass the
 # length check. Not a real credential.

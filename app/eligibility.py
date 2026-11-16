@@ -21,7 +21,9 @@ from datetime import date
 import ee
 
 from app import config
+from app.config import PARCEL_CLASS_MULTIPLIER
 from app.gee_init import initialize
+from app.validation import check_band_name
 
 
 @dataclass
@@ -53,20 +55,6 @@ class EligibilityResult:
         return self.eligible_ha + self.flagged_ha
 
 
-# Earth Engine band names must start with a letter and contain only letters,
-# digits and underscores. A violation is only reported when the graph is
-# evaluated on the server, so names are checked locally first.
-_BAND_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-
-
-def check_band_name(name: str) -> str:
-    """Validate a band name, raising locally rather than at evaluation time."""
-    if not _BAND_NAME_RE.match(name):
-        raise ValueError(
-            f"Invalid Earth Engine band name {name!r}. Band names must start "
-            "with a letter and contain only letters, digits and underscores."
-        )
-    return name
 
 
 def _loss_year_code(year: int) -> int:
@@ -385,3 +373,186 @@ def _build_caveats(project_start_year: int, window_start: int, scale: int) -> li
         "only. They do not replace a ground survey."
     )
     return caveats
+
+
+
+
+@dataclass
+class ParcelResult:
+    """Eligibility breakdown for one parcel."""
+
+    name: str
+    source: str
+    footprint_ha: float      # the parcel's own area
+    scored_ha: float         # area actually scored (less, if parcels overlap)
+    eligible_ha: float
+    flagged_ha: float
+    ineligible_ha: float
+
+    @property
+    def eligible_pct(self) -> float:
+        return (self.eligible_ha / self.scored_ha * 100) if self.scored_ha else 0.0
+
+    @property
+    def upside_ha(self) -> float:
+        return self.eligible_ha + self.flagged_ha
+
+
+def analyse_by_parcel(
+    parcels: list,
+    merged_geojson: dict,
+    total_area_ha: float,
+    canopy_pct: int = 10,
+    lookback_years: int = config.DEFAULT_LOOKBACK_YEARS,
+    project_start_year: int | None = None,
+    forest_definition_name: str = config.DEFAULT_FOREST_DEFINITION,
+) -> tuple[EligibilityResult, list[ParcelResult]]:
+    """Score each parcel separately, plus the combined total.
+
+    Scoring N parcels naively costs N round trips. Instead the parcel index is
+    painted into a raster and combined with the class code into a single
+    value, so ONE grouped reduction returns every (parcel, class) area. The
+    cost is the same as the merged analysis regardless of parcel count.
+
+    Overlapping ground belongs to whichever parcel paints last, so parcel
+    areas sum to the merged total rather than double counting.
+    """
+    initialize()
+
+    project_start_year = project_start_year or date.today().year
+    scale = config.scale_for_area(total_area_ha)
+    aoi = ee.Geometry(merged_geojson)
+
+    masks = build_masks(aoi, canopy_pct, lookback_years, project_start_year)
+    classified = masks["classified"]
+
+    # Parcel ids are 1-based so that 0 means "outside every parcel", which
+    # can happen at raster edges.
+    features = [
+        ee.Feature(ee.Geometry(p.geojson), {"pid": idx + 1})
+        for idx, p in enumerate(parcels)
+    ]
+    parcel_fc = ee.FeatureCollection(features)
+    parcel_img = (
+        ee.Image().int().paint(featureCollection=parcel_fc, color="pid").unmask(0)
+    )
+
+    composite = (
+        parcel_img.multiply(PARCEL_CLASS_MULTIPLIER)
+        .add(classified)
+        .rename("pc")
+        .clip(aoi)
+    )
+
+    grouped = (
+        ee.Image.pixelArea()
+        .addBands(composite)
+        .reduceRegion(
+            reducer=ee.Reducer.sum().group(groupField=1, groupName="pc"),
+            geometry=aoi,
+            scale=scale,
+            maxPixels=1e10,
+        )
+    )
+
+    reason_names = list(masks["reasons"].keys())
+    reason_stack = ee.Image.cat(
+        [masks["reasons"][n].rename(check_band_name(n)) for n in reason_names]
+    ).multiply(ee.Image.pixelArea())
+    reason_areas = reason_stack.reduceRegion(
+        reducer=ee.Reducer.sum(), geometry=aoi, scale=scale, maxPixels=1e10
+    )
+
+    raw_names = list(masks["raw_tests"].keys())
+    raw_stack = ee.Image.cat(
+        [masks["raw_tests"][n].rename(check_band_name(n)) for n in raw_names]
+    )
+    raw_coverage = raw_stack.reduceRegion(
+        reducer=ee.Reducer.mean(), geometry=aoi, scale=scale, maxPixels=1e10
+    )
+
+    payload = ee.Dictionary(
+        {
+            "grouped": grouped,
+            "reasons": reason_areas,
+            "coverage": raw_coverage,
+        }
+    ).getInfo()
+
+    tile_url = classified.selfMask().getMapId(
+        {
+            "min": config.CLASS_INELIGIBLE,
+            "max": config.CLASS_FLAGGED,
+            "palette": config.CLASS_PALETTE,
+        }
+    )["tile_fetcher"].url_format
+
+    # Decode the composite key back into (parcel index, class).
+    per_parcel: dict[int, dict[int, float]] = {}
+    totals: dict[int, float] = {}
+    for group in payload["grouped"].get("groups", []):
+        code = int(group["pc"])
+        ha = (group["sum"] or 0.0) / 10_000.0
+        pid, cls = divmod(code, PARCEL_CLASS_MULTIPLIER)
+        if pid == 0:
+            continue  # outside every parcel
+        per_parcel.setdefault(pid, {})[cls] = ha
+        totals[cls] = totals.get(cls, 0.0) + ha
+
+    parcel_results = []
+    for idx, parcel in enumerate(parcels, start=1):
+        by_class = per_parcel.get(idx, {})
+        elig = by_class.get(config.CLASS_ELIGIBLE, 0.0)
+        flag = by_class.get(config.CLASS_FLAGGED, 0.0)
+        inel = by_class.get(config.CLASS_INELIGIBLE, 0.0)
+        parcel_results.append(
+            ParcelResult(
+                name=parcel.name,
+                source=parcel.source,
+                footprint_ha=round(parcel.area_ha, 1),
+                scored_ha=round(elig + flag + inel, 1),
+                eligible_ha=round(elig, 1),
+                flagged_ha=round(flag, 1),
+                ineligible_ha=round(inel, 1),
+            )
+        )
+
+    coverage = {
+        n: (
+            None
+            if payload["coverage"].get(n) is None
+            else round(payload["coverage"][n] * 100, 2)
+        )
+        for n in raw_names
+    }
+
+    combined = EligibilityResult(
+        total_ha=round(total_area_ha, 1),
+        eligible_ha=round(totals.get(config.CLASS_ELIGIBLE, 0.0), 1),
+        flagged_ha=round(totals.get(config.CLASS_FLAGGED, 0.0), 1),
+        ineligible_ha=round(totals.get(config.CLASS_INELIGIBLE, 0.0), 1),
+        reason_ha={
+            n: round((payload["reasons"].get(n) or 0.0) / 10_000.0, 1)
+            for n in reason_names
+        },
+        test_coverage_pct=coverage,
+        scale_m=scale,
+        tile_url=tile_url,
+        assumptions={
+            "forest_definition": forest_definition_name,
+            "canopy_threshold_pct": canopy_pct,
+            "lookback_years": lookback_years,
+            "project_start_year": project_start_year,
+            "non_forest_required_from": masks["window_start"],
+            "analysis_scale_m": scale,
+            "parcel_count": len(parcels),
+            "scoring_mode": "per-parcel",
+            "hansen_asset": config.HANSEN_ASSET,
+            "worldcover_collection": config.WORLDCOVER_COLLECTION,
+            "worldcover_epoch": config.WORLDCOVER_EPOCH,
+            "slope_flag_threshold_deg": config.FLAG_SLOPE_DEGREES,
+        },
+        caveats=_build_caveats(project_start_year, masks["window_start"], scale),
+    )
+
+    return combined, parcel_results

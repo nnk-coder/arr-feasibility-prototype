@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, ".")
 
-from app.eligibility import check_band_name  # noqa: E402
+from app.validation import check_band_name  # noqa: E402
 
 SOURCE = pathlib.Path("app/eligibility.py")
 

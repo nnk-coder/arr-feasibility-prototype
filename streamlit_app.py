@@ -1,7 +1,8 @@
-"""ARR Feasibility Analysis — Phase 1 (India).
+"""ARR Feasibility Analysis — Phase 2 (India).
 
-Upload or draw a project boundary, run the VM0047 three-class eligibility
-mask, and see which parts of the land qualify for an ARR project.
+Upload or draw one or more project boundaries, run the VM0047 three-class
+eligibility mask, and see which parts of the land qualify — overall, or
+parcel by parcel.
 
 Governing principle: code computes, AI interprets. Every number on this page
 comes from Earth Engine or deterministic Python. Nothing is inferred.
@@ -17,22 +18,26 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from app import config
-from app.geometry import BoundaryError, build_boundary, load_boundary
+from app.geometry import (
+    BoundaryError,
+    build_boundary_from_parcels,
+    parcels_from_drawings,
+    parcels_from_file,
+)
 from app.mapping import build_map
 
 st.set_page_config(
     page_title="ARR Feasibility — India",
     page_icon="🌳",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
-
-# --------------------------------------------------------------- styling
 
 st.markdown(
     """
     <style>
       .block-container { padding-top: 2.2rem; }
-      [data-testid="stMetricValue"] { font-size: 1.6rem; }
+      [data-testid="stMetricValue"] { font-size: 1.5rem; }
       .caveat { font-size: 0.82rem; color: #555; line-height: 1.5; }
     </style>
     """,
@@ -40,11 +45,26 @@ st.markdown(
 )
 
 st.markdown("## 🌳 ARR Feasibility Analysis — VM0047")
-st.caption(
-    "Phase 1 · India · Eligibility screening from public satellite datasets"
-)
+st.caption("India · Eligibility screening from public satellite datasets")
 
-# --------------------------------------------------------------- sidebar
+# Parcels accumulate across uploads and drawings until explicitly cleared.
+st.session_state.setdefault("parcels", [])
+
+
+def _clear_results() -> None:
+    for key in ("result", "parcel_results", "result_key", "result_parcel_key"):
+        st.session_state.pop(key, None)
+
+
+def _parcel_set_key(parcels) -> str:
+    """Identity of the current parcel set, for invalidating stale results."""
+    payload = json.dumps(
+        [[p.name, p.geojson] for p in parcels], sort_keys=True
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------- sidebar
 
 with st.sidebar:
     st.markdown("### Forest definition")
@@ -62,9 +82,11 @@ with st.sidebar:
     )
     definition = config.FOREST_DEFINITIONS[definition_name]
 
-    st.info(f"**{definition['canopy_pct']}% canopy** · "
-            f"min {definition['min_area_ha']} ha · "
-            f"{definition['min_height_m']} m height\n\n{definition['note']}")
+    st.info(
+        f"**{definition['canopy_pct']}% canopy** · "
+        f"min {definition['min_area_ha']} ha · "
+        f"{definition['min_height_m']} m height\n\n{definition['note']}"
+    )
 
     override = st.checkbox("Override canopy threshold", value=False)
     canopy_pct = (
@@ -87,6 +109,18 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    st.markdown("### Scoring")
+    per_parcel = st.checkbox(
+        "Score each parcel separately",
+        value=False,
+        help=(
+            "Off: all parcels merged into one area — fastest. On: each parcel "
+            "scored on its own so you can see which to keep or drop. Both "
+            "cost a single Earth Engine call."
+        ),
+    )
+
+    st.markdown("---")
     with st.expander("🔧 Diagnostics"):
         st.caption(
             "Where configuration is being read from. Nothing sensitive is "
@@ -102,10 +136,6 @@ with st.sidebar:
                 st.error("Credentials: not set")
             else:
                 st.warning(f"Credentials: {cfg['credentials_source']}")
-                st.caption(
-                    "Not using Streamlit secrets. A committed .env file will "
-                    "override the Secrets box."
-                )
             st.json(cfg)
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not read configuration: {type(exc).__name__}")
@@ -114,114 +144,182 @@ with st.sidebar:
         st.caption(
             f"Hansen GFC · `{config.HANSEN_ASSET.split('/')[-1]}`\n\n"
             f"ESA WorldCover · {config.WORLDCOVER_EPOCH}\n\n"
-            f"SRTM 30 m · slope\n\n"
-            f"WDPA · protected areas"
+            f"SRTM 30 m · slope\n\nWDPA · protected areas"
         )
 
-# --------------------------------------------------------- boundary input
+# ----------------------------------------------------------- parcel input
 
 left, right = st.columns([1.15, 1])
 
 with left:
-    st.markdown("### 1 · Project boundary")
+    st.markdown("### 1 · Project parcels")
 
-    tab_upload, tab_draw = st.tabs(["Upload a file", "Draw on the map"])
+    errors: list[str] = []
 
-    boundary = None
-    boundary_error = None
+    tab_upload, tab_draw = st.tabs(["Upload files", "Draw on the map"])
 
     with tab_upload:
         uploaded = st.file_uploader(
-            "KML, KMZ, GeoJSON, or zipped Shapefile",
+            "KML, KMZ, GeoJSON, or zipped Shapefile — several at once is fine",
             type=["kml", "kmz", "geojson", "json", "zip"],
+            accept_multiple_files=True,
             label_visibility="collapsed",
         )
-        if uploaded is not None:
-            try:
-                boundary = load_boundary(uploaded.name, uploaded.getvalue())
-                st.session_state["boundary"] = boundary
-            except BoundaryError as exc:
-                boundary_error = str(exc)
+        if uploaded:
+            already = {
+                (p.source, p.name) for p in st.session_state["parcels"]
+            }
+            added = 0
+            for upload in uploaded:
+                try:
+                    for parcel in parcels_from_file(
+                        upload.name, upload.getvalue()
+                    ):
+                        if (parcel.source, parcel.name) not in already:
+                            st.session_state["parcels"].append(parcel)
+                            already.add((parcel.source, parcel.name))
+                            added += 1
+                except BoundaryError as exc:
+                    errors.append(f"**{upload.name}** — {exc}")
+            if added:
+                _clear_results()
 
     with tab_draw:
         st.caption(
-            "Use the polygon or rectangle tool on the map, then press "
-            "**Use drawn shape**."
+            "Draw with the polygon or rectangle tool, then add the shapes. "
+            "They stack with anything already loaded."
         )
-        if st.button("Use drawn shape"):
+        if st.button("➕ Add drawn shapes", use_container_width=True):
             drawings = st.session_state.get("map_state", {}).get("all_drawings")
             if not drawings:
-                boundary_error = "No shape drawn yet. Draw one on the map first."
+                errors.append("No shapes drawn yet. Draw one on the map first.")
             else:
-                from shapely.geometry import shape as shapely_shape
-
+                existing_drawn = sum(
+                    1 for p in st.session_state["parcels"] if p.source == "drawn"
+                )
                 try:
-                    geoms = [shapely_shape(d["geometry"]) for d in drawings]
-                    boundary = build_boundary(geoms, source_format="drawn")
-                    st.session_state["boundary"] = boundary
+                    new = parcels_from_drawings(
+                        drawings, start_index=existing_drawn + 1
+                    )
+                    # Drawn shapes persist in the map widget, so re-adding
+                    # would duplicate them. Match on geometry, not name.
+                    seen_geoms = {
+                        json.dumps(p.geojson, sort_keys=True)
+                        for p in st.session_state["parcels"]
+                    }
+                    added = 0
+                    for parcel in new:
+                        sig = json.dumps(parcel.geojson, sort_keys=True)
+                        if sig not in seen_geoms:
+                            st.session_state["parcels"].append(parcel)
+                            seen_geoms.add(sig)
+                            added += 1
+                    if added:
+                        _clear_results()
+                    else:
+                        errors.append("Those shapes are already added.")
                 except BoundaryError as exc:
-                    boundary_error = str(exc)
+                    errors.append(str(exc))
 
-    if boundary_error:
-        st.error(boundary_error)
+    for message in errors:
+        st.error(message)
 
-    boundary = st.session_state.get("boundary", boundary)
+    parcels = st.session_state["parcels"]
+    boundary = None
+
+    if parcels:
+        try:
+            boundary = build_boundary_from_parcels(parcels)
+        except BoundaryError as exc:
+            st.error(str(exc))
 
     if boundary is not None:
         st.success(
-            f"**{boundary.area_ha:,.1f} ha** · {boundary.part_count} part(s) "
-            f"· {boundary.source_format}"
+            f"**{boundary.area_ha:,.1f} ha** across "
+            f"**{boundary.part_count} parcel(s)** · "
+            f"{', '.join(boundary.sources)}"
         )
         for warning in boundary.warnings:
             st.warning(warning)
 
+        with st.expander(f"Parcel list ({boundary.part_count})", expanded=False):
+            for idx, parcel in enumerate(boundary.parcels):
+                cols = st.columns([4, 2, 1])
+                cols[0].write(parcel.name)
+                cols[1].write(f"{parcel.area_ha:,.1f} ha")
+                if cols[2].button("✕", key=f"rm_{idx}", help="Remove"):
+                    st.session_state["parcels"].pop(idx)
+                    _clear_results()
+                    st.rerun()
+
+        if st.button("Clear all parcels", use_container_width=True):
+            st.session_state["parcels"] = []
+            _clear_results()
+            st.rerun()
+
         scale = config.scale_for_area(boundary.area_ha)
         if scale > 10:
             st.info(
-                f"This area will be analysed at **{scale} m** rather than 10 m "
-                "because of its size."
+                f"This area will be analysed at **{scale} m** rather than "
+                "10 m because of its size."
             )
 
         run = st.button(
-            "🔍 Run eligibility analysis", type="primary", use_container_width=True
+            "🔍 Run eligibility analysis",
+            type="primary",
+            use_container_width=True,
         )
     else:
         st.caption(
-            "No boundary loaded. Upload a file or draw a shape to begin. "
-            "A sample KML for Bundelkhand ships in `samples/`."
+            "No parcels loaded. Upload files or draw shapes to begin. "
+            "`samples/sample_multi_parcel.kml` has three named parcels."
         )
         run = False
 
 # ------------------------------------------------------------ run analysis
 
+if boundary is not None:
+    parcel_key = _parcel_set_key(boundary.parcels)
+    settings_key = hashlib.sha256(
+        json.dumps(
+            {
+                "canopy": canopy_pct,
+                "lookback": lookback_years,
+                "start": int(project_start_year),
+                "per_parcel": per_parcel,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    run_key = f"{parcel_key}:{settings_key}"
 
-def _cache_key(boundary, canopy, lookback, start_year) -> str:
-    """Key the cached result on everything that would change it.
-
-    Without this, every pan or zoom of the map re-triggers the Earth Engine
-    calls, because Streamlit re-runs the whole script on map interaction.
-    """
-    payload = json.dumps(
-        {
-            "geom": boundary.geojson,
-            "canopy": canopy,
-            "lookback": lookback,
-            "start": start_year,
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
+    # Discard a result computed for a different parcel set or settings, so a
+    # new upload never shows the previous run's overlay and hectares.
+    if st.session_state.get("result_key") != run_key:
+        _clear_results()
+else:
+    run_key = None
+    _clear_results()
 
 if run and boundary is not None:
-    key = _cache_key(boundary, canopy_pct, lookback_years, project_start_year)
-    if st.session_state.get("result_key") != key:
-        from app.eligibility import analyse
-        from app.gee_init import GEEAuthError
+    from app.eligibility import analyse, analyse_by_parcel
+    from app.gee_init import GEEAuthError
 
-        try:
-            with st.spinner("Querying Earth Engine…"):
-                result = analyse(
+    try:
+        with st.spinner("Querying Earth Engine…"):
+            if per_parcel:
+                combined, parcel_results = analyse_by_parcel(
+                    parcels=boundary.parcels,
+                    merged_geojson=boundary.geojson,
+                    total_area_ha=boundary.area_ha,
+                    canopy_pct=canopy_pct,
+                    lookback_years=lookback_years,
+                    project_start_year=int(project_start_year),
+                    forest_definition_name=definition_name,
+                )
+                st.session_state["parcel_results"] = parcel_results
+            else:
+                combined = analyse(
                     geojson_geometry=boundary.geojson,
                     area_ha=boundary.area_ha,
                     canopy_pct=canopy_pct,
@@ -229,24 +327,26 @@ if run and boundary is not None:
                     project_start_year=int(project_start_year),
                     forest_definition_name=definition_name,
                 )
-            st.session_state["result"] = result
-            st.session_state["result_key"] = key
-        except GEEAuthError as exc:
-            st.error(f"Earth Engine authentication failed.\n\n{exc}")
-        except Exception as exc:  # noqa: BLE001 - surfaced to the user
-            from app.gee_init import safe_error
+                st.session_state["parcel_results"] = None
+        st.session_state["result"] = combined
+        st.session_state["result_key"] = run_key
+    except GEEAuthError as exc:
+        st.error(f"Earth Engine authentication failed.\n\n{exc}")
+    except Exception as exc:  # noqa: BLE001 - surfaced to the user
+        from app.gee_init import safe_error
 
-            st.error(f"Analysis failed.\n\n{safe_error(exc)}")
+        st.error(f"Analysis failed.\n\n{safe_error(exc)}")
 
 result = st.session_state.get("result")
+parcel_results = st.session_state.get("parcel_results")
 
-# ------------------------------------------------------------------- map
+# -------------------------------------------------------------------- map
 
 with left:
     st.markdown("### 2 · Map")
     fmap = build_map(
         center=boundary.centroid if boundary else None,
-        zoom=13 if boundary else None,
+        zoom=12 if boundary else None,
         boundary_geojson=boundary.geojson if boundary else None,
         tile_url=result.tile_url if result else None,
         show_draw=True,
@@ -258,15 +358,26 @@ with left:
         returned_objects=["all_drawings"],
     )
 
-# --------------------------------------------------------------- results
+# ---------------------------------------------------------------- results
+
+REASON_LABELS = {
+    "currently_forest": "Currently forest",
+    "was_forest_at_baseline": "Forest at 2000 baseline",
+    "forest_lost_in_lookback": "Forest lost within lookback window",
+    "built_up": "Built-up",
+    "permanent_water": "Permanent water",
+    "mangroves": "Mangroves",
+    "flag_wetland": "⚑ Herbaceous wetland (peat risk)",
+    "flag_steep_slope": "⚑ Steep slope",
+    "flag_protected_area": "⚑ Protected area overlap",
+    "flag_loss_near_window": "⚑ Forest loss just outside window",
+}
 
 with right:
     st.markdown("### 3 · Results")
 
     if result is None:
-        st.info(
-            "Load a boundary and run the analysis to see eligible area here."
-        )
+        st.info("Load parcels and run the analysis to see eligible area here.")
         st.markdown(
             """
             **What this checks**
@@ -285,47 +396,102 @@ with right:
         )
     else:
         m1, m2, m3 = st.columns(3)
-        m1.metric("Eligible", f"{result.eligible_ha:,.0f} ha",
-                  f"{result.eligible_pct:.1f}% of area")
-        m2.metric("Flagged", f"{result.flagged_ha:,.0f} ha",
-                  f"{result.flagged_pct:.1f}% of area")
+        m1.metric(
+            "Eligible",
+            f"{result.eligible_ha:,.0f} ha",
+            f"{result.eligible_pct:.1f}% of area",
+        )
+        m2.metric(
+            "Flagged",
+            f"{result.flagged_ha:,.0f} ha",
+            f"{result.flagged_pct:.1f}% of area",
+        )
         m3.metric("Ineligible", f"{result.ineligible_ha:,.0f} ha")
 
         st.caption(
             f"Upside if all flagged area clears review: "
-            f"**{result.upside_ha:,.0f} ha**"
+            f"**{result.upside_ha:,.0f} ha** · analysed at "
+            f"{result.scale_m} m"
         )
 
+        # ---------------------------------------------- per-parcel table
+        if parcel_results:
+            st.markdown("#### By parcel")
+            pdf = pd.DataFrame(
+                [
+                    {
+                        "Parcel": p.name,
+                        "Eligible ha": p.eligible_ha,
+                        "Flagged ha": p.flagged_ha,
+                        "Ineligible ha": p.ineligible_ha,
+                        "Eligible %": round(p.eligible_pct, 1),
+                        "Scored ha": p.scored_ha,
+                    }
+                    for p in parcel_results
+                ]
+            ).sort_values("Eligible ha", ascending=False)
+
+            st.dataframe(
+                pdf,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Eligible %": st.column_config.ProgressColumn(
+                        "Eligible %", min_value=0, max_value=100, format="%.1f%%"
+                    )
+                },
+            )
+
+            weak = [p for p in parcel_results if p.eligible_pct < 20]
+            if weak:
+                st.caption(
+                    f"{len(weak)} parcel(s) below 20% eligible: "
+                    + ", ".join(p.name for p in weak)
+                    + " — candidates to drop."
+                )
+        elif boundary is not None and boundary.part_count > 1:
+            st.caption(
+                f"{boundary.part_count} parcels were merged into one area. "
+                "Turn on **Score each parcel separately** in the sidebar to "
+                "see them individually."
+            )
+
+        # ------------------------------------------- filterable reasons
         st.markdown("#### Why land was excluded or flagged")
-        reasons = {
+
+        available = {
             k: v for k, v in result.reason_ha.items() if v and v > 0.05
         }
-        if reasons:
-            pretty = {
-                "currently_forest": "Currently forest",
-                "was_forest_at_baseline": "Forest at 2000 baseline",
-                "forest_lost_in_lookback": "Forest lost within lookback window",
-                "built_up": "Built-up",
-                "permanent_water": "Permanent water",
-                "mangroves": "Mangroves",
-                "flag_wetland": "⚑ Herbaceous wetland (peat risk)",
-                "flag_steep_slope": "⚑ Steep slope",
-                "flag_protected_area": "⚑ Protected area overlap",
-                "flag_loss_near_window": "⚑ Forest loss just outside window",
-            }
-            df = pd.DataFrame(
-                [
-                    {"Reason": pretty.get(k, k), "Hectares": round(v, 1)}
-                    for k, v in sorted(
-                        reasons.items(), key=lambda kv: -kv[1]
-                    )
-                ]
+        if available:
+            ordered = sorted(available.items(), key=lambda kv: -kv[1])
+            all_labels = [REASON_LABELS.get(k, k) for k, _ in ordered]
+
+            chosen = st.multiselect(
+                "Show reasons",
+                options=all_labels,
+                default=all_labels,
+                label_visibility="collapsed",
+                help="Untick a reason to remove it from the table and total.",
             )
-            st.dataframe(df, hide_index=True, use_container_width=True)
-            st.caption(
-                "Categories overlap — a pixel can fail several tests at once, "
-                "so these do not sum to the ineligible total."
-            )
+
+            rows = [
+                {"Reason": REASON_LABELS.get(k, k), "Hectares": round(v, 1)}
+                for k, v in ordered
+                if REASON_LABELS.get(k, k) in chosen
+            ]
+            if rows:
+                st.dataframe(
+                    pd.DataFrame(rows), hide_index=True, use_container_width=True
+                )
+                shown = sum(r["Hectares"] for r in rows)
+                st.caption(
+                    f"Showing {len(rows)} of {len(ordered)} reasons · "
+                    f"{shown:,.1f} ha across those shown. Categories overlap — "
+                    "a pixel can fail several tests, so these do not sum to "
+                    "the ineligible total."
+                )
+            else:
+                st.caption("No reasons selected.")
         else:
             st.caption("No exclusions detected across the project area.")
 
@@ -337,19 +503,31 @@ with right:
                 "rather than a real result."
             )
             cov = result.test_coverage_pct
-            cov_df = pd.DataFrame(
-                [
-                    {
-                        "Test": name.replace("combined_", "").replace("_", " ").capitalize(),
-                        "Coverage %": "no data" if pct is None else pct,
-                        "Combined": name.startswith("combined_"),
-                    }
-                    for name, pct in cov.items()
-                ]
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Test": name.replace("combined_", "")
+                            .replace("_", " ")
+                            .capitalize(),
+                            "Coverage %": "no data" if pct is None else pct,
+                            "Kind": (
+                                "combined result"
+                                if name.startswith("combined_")
+                                else "individual test"
+                            ),
+                        }
+                        for name, pct in cov.items()
+                    ]
+                ),
+                hide_index=True,
+                use_container_width=True,
             )
-            st.dataframe(cov_df, hide_index=True, use_container_width=True)
-
-            if all(v in (None, 0) for k, v in cov.items() if not k.startswith("combined_")):
+            if all(
+                v in (None, 0)
+                for k, v in cov.items()
+                if not k.startswith("combined_")
+            ):
                 st.error(
                     "Every individual test reads zero or no data. The source "
                     "datasets are not returning values over this area."
@@ -365,20 +543,32 @@ with right:
                     unsafe_allow_html=True,
                 )
 
+        export = {
+            "total_ha": result.total_ha,
+            "eligible_ha": result.eligible_ha,
+            "flagged_ha": result.flagged_ha,
+            "ineligible_ha": result.ineligible_ha,
+            "reason_ha": result.reason_ha,
+            "assumptions": result.assumptions,
+            "caveats": result.caveats,
+        }
+        if parcel_results:
+            export["parcels"] = [
+                {
+                    "name": p.name,
+                    "source": p.source,
+                    "footprint_ha": p.footprint_ha,
+                    "scored_ha": p.scored_ha,
+                    "eligible_ha": p.eligible_ha,
+                    "flagged_ha": p.flagged_ha,
+                    "ineligible_ha": p.ineligible_ha,
+                }
+                for p in parcel_results
+            ]
+
         st.download_button(
             "📥 Download result as JSON",
-            json.dumps(
-                {
-                    "total_ha": result.total_ha,
-                    "eligible_ha": result.eligible_ha,
-                    "flagged_ha": result.flagged_ha,
-                    "ineligible_ha": result.ineligible_ha,
-                    "reason_ha": result.reason_ha,
-                    "assumptions": result.assumptions,
-                    "caveats": result.caveats,
-                },
-                indent=2,
-            ),
+            json.dumps(export, indent=2),
             file_name="arr_eligibility.json",
             mime="application/json",
             use_container_width=True,

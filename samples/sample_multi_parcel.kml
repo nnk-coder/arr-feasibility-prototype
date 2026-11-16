@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2">
+  <Document>
+    <name>Sample multi-parcel ARR site — Bundelkhand</name>
+    <description>
+      Three adjacent parcels for testing per-parcel analysis. Coordinates are
+      illustrative, not a real project site.
+    </description>
+    <Placemark>
+      <name>North Block</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              79.000000,25.020000,0
+              79.022140,25.020000,0
+              79.022140,25.040160,0
+              79.000000,25.040160,0
+              79.000000,25.020000,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+    <Placemark>
+      <name>Riverside Plot</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              79.030000,25.020000,0
+              79.052140,25.020000,0
+              79.052140,25.040160,0
+              79.030000,25.040160,0
+              79.030000,25.020000,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+    <Placemark>
+      <name>South Block</name>
+      <Polygon>
+        <outerBoundaryIs>
+          <LinearRing>
+            <coordinates>
+              79.000000,24.990000,0
+              79.022140,24.990000,0
+              79.022140,25.010160,0
+              79.000000,25.010160,0
+              79.000000,24.990000,0
+            </coordinates>
+          </LinearRing>
+        </outerBoundaryIs>
+      </Polygon>
+    </Placemark>
+  </Document>
+</kml>

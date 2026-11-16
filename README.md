@@ -1,4 +1,4 @@
-# ARR Feasibility Analysis — Phase 1 (India)
+# ARR Feasibility Analysis — Phase 2 (India)
 
 Screens a land parcel for Afforestation, Reforestation and Revegetation
 eligibility under Verra VM0047. Upload a boundary, get back a per-pixel map of
@@ -9,18 +9,34 @@ threshold that India reports under to UNFCCC and FAO.
 
 ---
 
-## What Phase 1 does
+## What it does
 
-- Loads a project boundary from KML, KMZ, GeoJSON, or a zipped Shapefile, or
-  from a shape drawn on the map
+- Loads project parcels from KML, KMZ, GeoJSON, or zipped Shapefiles — several
+  files at once — and from shapes drawn on the map. Files and drawings stack.
+- Names each parcel from its KML `<name>` or GeoJSON properties, falling back
+  to an index
 - Runs a three-class eligibility mask in Google Earth Engine — eligible,
   flagged for review, ineligible
-- Renders that mask as a coloured overlay on satellite imagery
-- Reports hectares in each class, plus a breakdown of *why* land was excluded
+- Scores parcels merged, or each one separately so you can see which to drop
+- Renders the mask as a coloured overlay on satellite imagery
+- Reports hectares in each class, plus a filterable breakdown of *why* land
+  was excluded
 - Prints every assumption and limitation alongside the result
 
 Not yet built: the LULC classification layer (Phase 3) and the carbon credit
 estimator (Phase 4).
+
+### Per-parcel scoring
+
+Scoring N parcels naively costs N Earth Engine round trips. Instead the parcel
+index is painted into a raster and packed with the class code into one value
+(`parcel_id * 10 + class`), so a single grouped reduction returns every
+(parcel, class) area. Per-parcel mode costs the same as merged mode whatever
+the parcel count.
+
+Overlapping ground is assigned to whichever parcel paints last, so parcel
+areas sum to the merged total rather than double counting. The app warns when
+parcels overlap.
 
 ---
 
@@ -121,6 +137,8 @@ repository — `.env` and `*.json` are already in `.gitignore`.
 
 ```
 app/
+  validation.py    Pure checks - band names, credential keys, error scrubbing.
+                   No third-party imports, so its tests run anywhere.
   config.py        Dataset pins, India presets, adaptive scale, class palette
   geometry.py      Boundary parsing, validation, equal-area hectares
   gee_init.py      Earth Engine auth — service account and local paths
@@ -165,7 +183,18 @@ These are printed in the app alongside every result, not buried here.
 ./run_tests.sh
 ```
 
-Runs every offline check — none need Earth Engine credentials.
+No Earth Engine credentials needed. The script runs in two groups:
+
+**No dependencies required** — classification logic, credential validation,
+band names, and the parcel grouping key. These import only `app/validation.py`
+and `app/config.py`, which use nothing outside the standard library, so they
+run on a fresh checkout before `pip install`.
+
+**Requires installed packages** — the geometry pipeline and parcel
+accumulation. Skipped with instructions if the dependencies are missing,
+rather than failing with import tracebacks.
+
+Run it before every push.
 
 Checks all 2,048 combinations of the eleven per-pixel conditions and asserts
 that the three classes stay mutually exclusive and exhaustive. Overlapping
