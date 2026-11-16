@@ -121,29 +121,75 @@ def validate_service_account_key(key: dict) -> None:
         )
 
 
-def _credentials_json() -> str:
-    """Service account JSON from env or Streamlit secrets, if present."""
-    if GEE_CREDENTIALS_JSON:
-        return GEE_CREDENTIALS_JSON
-
-    # Streamlit Cloud puts secrets in st.secrets rather than the environment.
+def _from_streamlit_secrets(name: str) -> str:
     try:
         import streamlit as st
 
-        return st.secrets.get("GEE_CREDENTIALS_JSON", "")
+        return str(st.secrets.get(name, "") or "")
     except Exception:
         return ""
 
 
-def _project() -> str:
-    if GEE_PROJECT:
-        return GEE_PROJECT
-    try:
-        import streamlit as st
+def _resolve(name: str, env_value: str) -> tuple[str, str]:
+    """Resolve a setting, returning (value, source).
 
-        return st.secrets.get("GEE_PROJECT", "")
-    except Exception:
-        return ""
+    Streamlit secrets take precedence over the environment. This order
+    matters: config.py calls load_dotenv() at import, so a .env file that
+    found its way into the repository would otherwise silently override the
+    Secrets box on a deployment — and the resulting failure looks like the
+    secrets never saved.
+    """
+    secret = _from_streamlit_secrets(name)
+    if secret:
+        return secret, "Streamlit secrets"
+    if env_value:
+        return env_value, "environment or .env file"
+    return "", "not set"
+
+
+def _credentials_json() -> tuple[str, str]:
+    return _resolve("GEE_CREDENTIALS_JSON", GEE_CREDENTIALS_JSON)
+
+
+def _project() -> tuple[str, str]:
+    return _resolve("GEE_PROJECT", GEE_PROJECT)
+
+
+def describe_config() -> dict:
+    """Where settings are coming from, with nothing sensitive in the output.
+
+    Shown in the app's diagnostics panel so a misconfigured deployment can be
+    identified without guessing.
+    """
+    project, project_source = _project()
+    creds, creds_source = _credentials_json()
+
+    info = {
+        "project": project or "(not set)",
+        "project_source": project_source,
+        "credentials_source": creds_source,
+        "credentials_present": bool(creds),
+    }
+
+    if creds:
+        info["credentials_length"] = len(creds)
+        try:
+            key = json.loads(creds)
+            # Identifying, non-secret fields only. Never the private key.
+            info["key_client_email"] = key.get("client_email", "(absent)")
+            info["key_project_id"] = key.get("project_id", "(absent)")
+            info["key_type"] = key.get("type", "(absent)")
+            pk = str(key.get("private_key", ""))
+            info["private_key_chars"] = len(pk)
+            info["private_key_looks_real"] = (
+                "BEGIN PRIVATE KEY" in pk
+                and len(pk) >= MIN_PRIVATE_KEY_CHARS
+                and "..." not in pk
+            )
+        except json.JSONDecodeError as exc:
+            info["parse_error"] = f"{type(exc).__name__}: {exc.msg}"
+
+    return info
 
 
 def initialize(force: bool = False) -> None:
@@ -152,14 +198,14 @@ def initialize(force: bool = False) -> None:
     if _initialised and not force:
         return
 
-    project = _project()
+    project, _project_source = _project()
     if not project:
         raise GEEAuthError(
-            "GEE_PROJECT is not set. Add it to your .env file locally, or to "
-            "Streamlit secrets when deployed."
+            "GEE_PROJECT is not set. Add it to Streamlit secrets when "
+            "deployed, or to your .env file locally."
         )
 
-    key_json = _credentials_json()
+    key_json, creds_source = _credentials_json()
 
     if key_json:
         try:
@@ -182,7 +228,22 @@ def initialize(force: bool = False) -> None:
                 "contents of the service account key file, on a single line, "
                 "wrapped in single quotes."
             ) from None
-        validate_service_account_key(key)
+        try:
+            validate_service_account_key(key)
+        except GEEAuthError as exc:
+            # Naming the source is the whole diagnosis when a stray .env in
+            # the repository is shadowing the Secrets box.
+            raise GEEAuthError(
+                f"{exc}\n\nThese credentials were read from: {creds_source}."
+                + (
+                    "\n\nStreamlit secrets were NOT used. If you updated the "
+                    "Secrets box and are still seeing this, a .env file is "
+                    "committed to your repository and is overriding it — "
+                    "delete it and push."
+                    if creds_source != "Streamlit secrets"
+                    else ""
+                )
+            ) from None
 
         try:
             creds = ee.ServiceAccountCredentials(

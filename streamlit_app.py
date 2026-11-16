@@ -87,6 +87,29 @@ with st.sidebar:
     )
 
     st.markdown("---")
+    with st.expander("🔧 Diagnostics"):
+        st.caption(
+            "Where configuration is being read from. Nothing sensitive is "
+            "shown — never the private key."
+        )
+        try:
+            from app.gee_init import describe_config
+
+            cfg = describe_config()
+            if cfg["credentials_source"] == "Streamlit secrets":
+                st.success("Credentials: Streamlit secrets")
+            elif cfg["credentials_source"] == "not set":
+                st.error("Credentials: not set")
+            else:
+                st.warning(f"Credentials: {cfg['credentials_source']}")
+                st.caption(
+                    "Not using Streamlit secrets. A committed .env file will "
+                    "override the Secrets box."
+                )
+            st.json(cfg)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not read configuration: {type(exc).__name__}")
+
     with st.expander("Datasets"):
         st.caption(
             f"Hansen GFC · `{config.HANSEN_ASSET.split('/')[-1]}`\n\n"
